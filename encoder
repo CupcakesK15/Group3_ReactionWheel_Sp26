@@ -1,0 +1,53 @@
+import RPi.GPIO as GPIO
+import time
+
+# --- Configuration ---
+PIN_A = 17  # Change to match your wiring
+PIN_B = 27  # Change to match your wiring
+CPR = 28    # Counts per revolution at the motor shaft
+
+# --- State ---
+count = 0
+last_a = 0
+
+def encoder_callback(channel):
+    global count, last_a
+    a = GPIO.input(PIN_A)
+    b = GPIO.input(PIN_B)
+
+    if channel == PIN_A:
+        # Rising edge on A
+        if b == 0:
+            count += 1
+        else:
+            count -= 1
+        last_a = a
+    elif channel == PIN_B:
+        # Rising edge on B
+        if a == 1:
+            count += 1
+        else:
+            count -= 1
+
+# --- Setup ---
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(PIN_A, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+GPIO.setup(PIN_B, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+
+GPIO.add_event_detect(PIN_A, GPIO.BOTH, callback=encoder_callback)
+GPIO.add_event_detect(PIN_B, GPIO.BOTH, callback=encoder_callback)
+
+print("Reading encoder. Press Ctrl+C to stop.")
+print(f"CPR: {CPR} counts/rev at motor shaft\n")
+
+try:
+    while True:
+        revolutions = count / CPR
+        print(f"Count: {count:6d}  |  Revolutions: {revolutions:.2f}", end='\r')
+        time.sleep(0.05)
+
+except KeyboardInterrupt:
+    print("\nStopped.")
+
+finally:
+    GPIO.cleanup()

@@ -4,6 +4,7 @@ import busio
 import time
 from adafruit_bno08x import BNO_REPORT_GYROSCOPE
 from adafruit_bno08x.i2c import BNO08X_I2C
+import math
 
 # --- Pins ---
 MOTOR_PWM_R = 12 # Pin for Forward
@@ -39,9 +40,19 @@ try:
         set_motor(s)
         time.sleep(0.5)
         
-        # Get Platform Speed
+        # Inside your loop:
         gyro_x, gyro_y, gyro_z = bno.gyro
-        print(f"Motor Power: {s}% | Platform Yaw Velocity: {gyro_z:.4f} rad/s")
+
+        # Calculate the absolute rotational speed (magnitude)
+        # This ignores the tilt angle entirely!
+        actual_rotational_speed = math.sqrt(gyro_x**2 + gyro_y**2 + gyro_z**2)
+
+        # If you need to know direction (Clockwise vs Counter-Clockwise):
+        # Use the sign of the Z axis to determine direction
+        if gyro_z < 0:
+            actual_rotational_speed *= -1
+
+        print(f"Platform Speed (Tilt-Compensated): {actual_rotational_speed:.4f} rad/s")
 
     time.sleep(2)
     set_motor(0)

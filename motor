@@ -1,0 +1,68 @@
+import RPi.GPIO as GPIO
+import time
+
+# --- Pin assignments (adjust to match your actual wiring) ---
+R_EN  = 23   # GPIO pin → R_EN on board
+L_EN  = 24   # GPIO pin → L_EN on board
+RPWM  = 18   # GPIO pin → RPWM on board (hardware PWM pin)
+LPWM  = 12   # GPIO pin → LPWM on board (hardware PWM pin)
+
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(R_EN,  GPIO.OUT)
+GPIO.setup(L_EN,  GPIO.OUT)
+GPIO.setup(RPWM,  GPIO.OUT)
+GPIO.setup(LPWM,  GPIO.OUT)
+
+# Set up PWM at 1 kHz on both channels
+# (BTS7960 supports up to 25 kHz, 1 kHz is safe and audible for debugging)
+rpwm = GPIO.PWM(RPWM, 1000)
+lpwm = GPIO.PWM(LPWM, 1000)
+rpwm.start(0)
+lpwm.start(0)
+
+def enable_bridge():
+    """Both EN pins must be HIGH before applying PWM."""
+    GPIO.output(R_EN, GPIO.HIGH)
+    GPIO.output(L_EN, GPIO.HIGH)
+
+def spin_forward(speed_pct):
+    """RPWM = PWM, LPWM = 0 → Forward."""
+    lpwm.ChangeDutyCycle(0)      # LPWM LOW first to avoid shoot-through
+    rpwm.ChangeDutyCycle(speed_pct)
+
+def spin_reverse(speed_pct):
+    """LPWM = PWM, RPWM = 0 → Reverse."""
+    rpwm.ChangeDutyCycle(0)      # RPWM LOW first to avoid shoot-through
+    lpwm.ChangeDutyCycle(speed_pct)
+
+def brake():
+    """Both PWMs LOW with ENs HIGH → active brake."""
+    rpwm.ChangeDutyCycle(0)
+    lpwm.ChangeDutyCycle(0)
+
+def coast():
+    """Both ENs LOW → motor terminals float, slow friction stop."""
+    GPIO.output(R_EN, GPIO.LOW)
+    GPIO.output(L_EN, GPIO.LOW)
+
+try:
+    enable_bridge()
+
+    print("Spinning forward slowly at 30%...")
+    spin_forward(30)
+    time.sleep(5)
+
+    print("Braking...")
+    brake()
+    time.sleep(1)
+
+    print("Done.")
+    coast()
+
+except KeyboardInterrupt:
+    print("\nInterrupted.")
+
+finally:
+    rpwm.stop()
+    lpwm.stop()
+    GPIO.cleanup()

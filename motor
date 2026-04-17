@@ -4,19 +4,66 @@ import time
 # --- Pin Configuration ---
 # BTS7960 RPWM (Right PWM) -> GPIO 12
 # BTS7960 LPWM (Left PWM)  -> GPIO 13
-# BTS7960 R_EN and L_EN should be connected to 3.3V
+# BTS7960 R_EN (Right Enable) -> GPIO 22
+# BTS7960 L_EN (Left Enable)  -> GPIO 23
 RPWM = 12
 LPWM = 13
+R_EN = 22
+L_EN = 23
+ENC_A    = 17  
+ENC_B    = 18 
 
 # --- Setup ---
 GPIO.setmode(GPIO.BCM)
 GPIO.setup(RPWM, GPIO.OUT)
 GPIO.setup(LPWM, GPIO.OUT)
+GPIO.setup(R_EN, GPIO.OUT)
+GPIO.setup(L_EN, GPIO.OUT)
 
-# Set frequency to 1kHz (standard for motor control)
+# --- Encoder Configuration ---
+ENC_A = 5
+ENC_B = 6
+TICKS_PER_REV = 14  # CHANGE THIS: 4 × your encoder's CPR (e.g. 11 CPR × 4 = 44)
+
+# --- Encoder Setup ---
+GPIO.setup(ENC_A, GPIO.IN, pull_up_down=GPIO.PUD_OFF)
+GPIO.setup(ENC_B, GPIO.IN, pull_up_down=GPIO.PUD_OFF)
+
+tick_count = 0
+last_time = time.time()
+
+def encoder_callback(channel):
+    global tick_count
+    if GPIO.input(ENC_B):
+        tick_count += 1
+    else:
+        tick_count -= 1
+
+GPIO.add_event_detect(ENC_A, GPIO.RISING, callback=encoder_callback)
+print(f"ENC_A initial state: {GPIO.input(ENC_A)}")
+print(f"ENC_B initial state: {GPIO.input(ENC_B)}")
+
+def get_rpm():
+    global tick_count, last_time
+    now = time.time()
+    dt = now - last_time
+    ticks = tick_count
+    tick_count = 0        # reset count for next window
+    last_time = now
+    if dt == 0:
+        return 0.0
+    rps = ticks / TICKS_PER_REV / dt   # revolutions per second
+    rpm = rps * 60
+    rpm = -rpm;
+    return rpm
+
+# Enable the driver (must be HIGH before PWM will work)
+GPIO.output(R_EN, GPIO.HIGH)
+GPIO.output(L_EN, GPIO.HIGH)
+
+# Set frequency to 100Hz (standard for motor control)
 pwm_r = GPIO.PWM(RPWM, 1000)
 pwm_l = GPIO.PWM(LPWM, 1000)
-
 pwm_r.start(0)
 pwm_l.start(0)
 
@@ -35,24 +82,22 @@ def test_motor(power):
         pwm_l.ChangeDutyCycle(abs(power))
 
 try:
-    # 1. Run at 50% for 3 seconds
-    test_motor(50)
-    time.sleep(3)
+    test_motor(10)
+    for _ in range(400):          # 100 × 0.1s = 10 seconds
+        time.sleep(0.1)
+        rpm = get_rpm()
+        print(f"RPM: {rpm:.1f}")
 
-    # 2. Stop for 1 second
-    print("Stopping...")
-    test_motor(0)
-    time.sleep(1)
 
-    # 3. Run at -50% (Reverse) for 3 seconds
-    test_motor(-50)
-    time.sleep(3)
 
 except KeyboardInterrupt:
     print("\nManual stop.")
 
 finally:
     print("Cleaning up GPIO.")
+    # Disable the driver before cleanup
+    GPIO.output(R_EN, GPIO.LOW)
+    GPIO.output(L_EN, GPIO.LOW)
     pwm_r.stop()
     pwm_l.stop()
     GPIO.cleanup()

@@ -38,7 +38,8 @@ try:
         curr_ticks = encoder.steps
         
         # Velocity = delta_ticks / delta_time
-        actual_velocity = (curr_ticks - last_ticks) / dt
+        # actual_velocity = (curr_ticks - last_ticks) / dt
+        actual_velocity = abs((curr_ticks - last_ticks) / dt)
         
         # 2. Control Loop
         error = target_velocity - actual_velocity

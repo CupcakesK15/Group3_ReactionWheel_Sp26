@@ -1,103 +1,84 @@
-import RPi.GPIO as GPIO
+from gpiozero import PWMOutputDevice, OutputDevice, RotaryEncoder
+from gpiozero.pins.lgpio import LGPIOFactory
+from gpiozero import Device
 import time
 
+Device.pin_factory = LGPIOFactory()
+
 # --- Pin Configuration ---
-# BTS7960 RPWM (Right PWM) -> GPIO 12
-# BTS7960 LPWM (Left PWM)  -> GPIO 13
-# BTS7960 R_EN (Right Enable) -> GPIO 22
-# BTS7960 L_EN (Left Enable)  -> GPIO 23
 RPWM = 12
 LPWM = 13
 R_EN = 22
 L_EN = 23
-ENC_A    = 17  
-ENC_B    = 18 
-
-# --- Setup ---
-GPIO.setmode(GPIO.BCM)
-GPIO.setup(RPWM, GPIO.OUT)
-GPIO.setup(LPWM, GPIO.OUT)
-GPIO.setup(R_EN, GPIO.OUT)
-GPIO.setup(L_EN, GPIO.OUT)
-
-# --- Encoder Configuration ---
 ENC_A = 5
 ENC_B = 6
+
 TICKS_PER_REV = 14  # CHANGE THIS: 4 × your encoder's CPR (e.g. 11 CPR × 4 = 44)
 
-# --- Encoder Setup ---
-GPIO.setup(ENC_A, GPIO.IN, pull_up_down=GPIO.PUD_OFF)
-GPIO.setup(ENC_B, GPIO.IN, pull_up_down=GPIO.PUD_OFF)
+# --- Motor Setup ---
+rpwm = PWMOutputDevice(RPWM, frequency=1000)
+lpwm = PWMOutputDevice(LPWM, frequency=1000)
+r_en = OutputDevice(R_EN, initial_value=True)
+l_en = OutputDevice(L_EN, initial_value=True)
 
-tick_count = 0
+# --- Encoder Setup ---
+encoder = RotaryEncoder(ENC_A, ENC_B, max_steps=0)  # max_steps=0 = unlimited
+last_steps = 0
 last_time = time.time()
 
-def encoder_callback(channel):
-    global tick_count
-    if GPIO.input(ENC_B):
-        tick_count += 1
-    else:
-        tick_count -= 1
-
-GPIO.add_event_detect(ENC_A, GPIO.RISING, callback=encoder_callback)
-print(f"ENC_A initial state: {GPIO.input(ENC_A)}")
-print(f"ENC_B initial state: {GPIO.input(ENC_B)}")
+print(f"Encoder initialized. Steps: {encoder.steps}")
 
 def get_rpm():
-    global tick_count, last_time
+    global last_steps, last_time
     now = time.time()
     dt = now - last_time
-    ticks = tick_count
-    tick_count = 0        # reset count for next window
+    current_steps = encoder.steps
+    ticks = current_steps - last_steps
+    last_steps = current_steps
     last_time = now
     if dt == 0:
         return 0.0
-    rps = ticks / TICKS_PER_REV / dt   # revolutions per second
+    rps = ticks / TICKS_PER_REV / dt
     rpm = rps * 60
-    rpm = -rpm;
+    rpm = -rpm
     return rpm
-
-# Enable the driver (must be HIGH before PWM will work)
-GPIO.output(R_EN, GPIO.HIGH)
-GPIO.output(L_EN, GPIO.HIGH)
-
-# Set frequency to 100Hz (standard for motor control)
-pwm_r = GPIO.PWM(RPWM, 1000)
-pwm_l = GPIO.PWM(LPWM, 1000)
-pwm_r.start(0)
-pwm_l.start(0)
 
 def test_motor(power):
     """
     power: -100 to 100
     Positive = Clockwise, Negative = Counter-Clockwise
     """
-    if power >= 0:
+    speed = max(-100, min(100, power)) / 100.0
+    if speed >= 0:
         print(f"Spinning Clockwise at {power}% power...")
-        pwm_r.ChangeDutyCycle(power)
-        pwm_l.ChangeDutyCycle(0)
+        rpwm.value = speed
+        lpwm.value = 0
     else:
         print(f"Spinning Counter-Clockwise at {abs(power)}% power...")
-        pwm_r.ChangeDutyCycle(0)
-        pwm_l.ChangeDutyCycle(abs(power))
+        rpwm.value = 0
+        lpwm.value = -speed
+
+def cleanup():
+    rpwm.value = 0
+    lpwm.value = 0
+    r_en.off()
+    l_en.off()
+    rpwm.close()
+    lpwm.close()
+    r_en.close()
+    l_en.close()
+    encoder.close()
 
 try:
-    test_motor(10)
-    for _ in range(400):          # 100 × 0.1s = 10 seconds
+    test_motor(25)
+    for _ in range(400):        # 400 × 0.1s = 40 seconds
         time.sleep(0.1)
         rpm = get_rpm()
         print(f"RPM: {rpm:.1f}")
-
-
 
 except KeyboardInterrupt:
     print("\nManual stop.")
 
 finally:
     print("Cleaning up GPIO.")
-    # Disable the driver before cleanup
-    GPIO.output(R_EN, GPIO.LOW)
-    GPIO.output(L_EN, GPIO.LOW)
-    pwm_r.stop()
-    pwm_l.stop()
-    GPIO.cleanup()
+    cleanup()

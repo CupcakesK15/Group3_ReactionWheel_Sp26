@@ -3,29 +3,19 @@ import board
 import busio
 from adafruit_bno08x.i2c import BNO08X_I2C
 from adafruit_bno08x import BNO_REPORT_GYROSCOPE, BNO_REPORT_ROTATION_VECTOR
-import RPi.GPIO as GPIO
+from gpiozero import PWMOutputDevice, OutputDevice
+from gpiozero.pins.lgpio import LGPIOFactory
+from gpiozero import Device
 import math
 
-# ─── MOTOR PINS (BTS7960) ───────────────────────────────────────────────────
-RPWM = 12   # Forward PWM
-LPWM = 13   # Reverse PWM
-R_EN = 22   # Forward enable
-L_EN = 23   # Reverse enable
+# ─── PIN FACTORY (required for Pi 5) ─────────────────────────────────────────
+Device.pin_factory = LGPIOFactory()
 
-# ─── GPIO SETUP ─────────────────────────────────────────────────────────────
-GPIO.setmode(GPIO.BCM)
-GPIO.setup(RPWM, GPIO.OUT)
-GPIO.setup(LPWM, GPIO.OUT)
-GPIO.setup(R_EN, GPIO.OUT)
-GPIO.setup(L_EN, GPIO.OUT)
-
-GPIO.output(R_EN, GPIO.HIGH)
-GPIO.output(L_EN, GPIO.HIGH)
-
-rpwm_pwm = GPIO.PWM(RPWM, 1000)  # 1kHz PWM
-lpwm_pwm = GPIO.PWM(LPWM, 1000)
-rpwm_pwm.start(0)
-lpwm_pwm.start(0)
+# ─── MOTOR SETUP (BTS7960) ───────────────────────────────────────────────────
+rpwm = PWMOutputDevice(12, frequency=1000)
+lpwm = PWMOutputDevice(13, frequency=1000)
+r_en = OutputDevice(22, initial_value=True)
+l_en = OutputDevice(23, initial_value=True)
 
 # ─── IMU SETUP ───────────────────────────────────────────────────────────────
 i2c = busio.I2C(board.SCL, board.SDA, frequency=400000)
@@ -33,23 +23,30 @@ imu = BNO08X_I2C(i2c)
 imu.enable_feature(BNO_REPORT_GYROSCOPE)
 imu.enable_feature(BNO_REPORT_ROTATION_VECTOR)
 
-# ─── MOTOR CONTROL ──────────────────────────────────────────────────────────
+# ─── MOTOR CONTROL ───────────────────────────────────────────────────────────
 def set_motor(speed: float):
     """
     speed: -100.0 to +100.0 (% duty cycle)
     Positive = flywheel spins one way, negative = other way.
     """
-    speed = max(-100.0, min(100.0, speed))
+    speed = max(-100.0, min(100.0, speed)) / 100.0
     if speed >= 0:
-        rpwm_pwm.ChangeDutyCycle(speed)
-        lpwm_pwm.ChangeDutyCycle(0)
+        rpwm.value = speed
+        lpwm.value = 0
     else:
-        rpwm_pwm.ChangeDutyCycle(0)
-        lpwm_pwm.ChangeDutyCycle(-speed)
+        rpwm.value = 0
+        lpwm.value = -speed
 
 def stop_motor():
-    rpwm_pwm.ChangeDutyCycle(0)
-    lpwm_pwm.ChangeDutyCycle(0)
+    rpwm.value = 0
+    lpwm.value = 0
+
+def cleanup():
+    stop_motor()
+    rpwm.close()
+    lpwm.close()
+    r_en.close()
+    l_en.close()
 
 # ─── IMU HELPERS ─────────────────────────────────────────────────────────────
 def quaternion_to_rotation_matrix(quat_i, quat_j, quat_k, quat_real):
@@ -68,8 +65,8 @@ def get_vertical_angular_velocity(imu):
     angular velocity onto the world vertical axis (Z).
     Returns angular velocity in rad/s about the true vertical.
     """
-    gyro = imu.gyro                     # (gx, gy, gz) in IMU body frame
-    quat = imu.quaternion               # (i, j, k, real)
+    gyro = imu.gyro       # (gx, gy, gz) in IMU body frame
+    quat = imu.quaternion # (i, j, k, real)
 
     if gyro is None or quat is None:
         return None
@@ -89,9 +86,9 @@ def get_vertical_angular_velocity(imu):
     return wz
 
 # ─── MAIN LOOP ───────────────────────────────────────────────────────────────
-MOTOR_SPEED = 40.0   # % duty cycle — start gentle, ramp up as needed
-RUN_TIME    = 10.0   # seconds to run
-LOG_INTERVAL = 0.05  # seconds between readings (20 Hz)
+MOTOR_SPEED = 5.0    # % duty cycle — start gentle, ramp up as needed
+RUN_TIME    = 10.0    # seconds to run
+LOG_INTERVAL = 0.05   # seconds between readings (20 Hz)
 
 print("Starting in 2 seconds — do not disturb the platform...")
 time.sleep(2)
@@ -116,12 +113,33 @@ try:
         if elapsed < LOG_INTERVAL:
             time.sleep(LOG_INTERVAL - elapsed)
 
+print("5 seconds of downtime — do not disturb the platform...")
+time.sleep(2)
+
+print(f"Spinning flywheel at {MOTOR_SPEED}% duty cycle for {RUN_TIME}s")
+set_motor(MOTOR_SPEED)
+
+start = time.time()
+try:
+    while time.time() - start < RUN_TIME:
+        t0 = time.time()
+
+        omega_z = get_vertical_angular_velocity(imu)
+
+        if omega_z is not None:
+            omega_deg = math.degrees(omega_z)
+            print(f"t={time.time()-start:5.2f}s | "
+                  f"Platform ω = {omega_z:+7.4f} rad/s  ({omega_deg:+7.2f} °/s)")
+
+        # Pace the loop
+        elapsed = time.time() - t0
+        if elapsed < LOG_INTERVAL:
+            time.sleep(LOG_INTERVAL - elapsed)
+
+
 except KeyboardInterrupt:
     print("\nInterrupted by user.")
 
 finally:
     print("Stopping motor and cleaning up.")
-    stop_motor()
-    rpwm_pwm.stop()
-    lpwm_pwm.stop()
-    GPIO.cleanup()
+    cleanup()

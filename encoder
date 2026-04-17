@@ -1,41 +1,41 @@
-import RPi.GPIO as GPIO
+import lgpio
 import time
 
 # --- Configuration ---
-PIN_A = 17  # Change to match your wiring
-PIN_B = 27  # Change to match your wiring
-CPR = 28    # Counts per revolution at the motor shaft
+PIN_A = 17
+PIN_B = 27
+CPR = 14    # Counts per revolution at the motor shaft
 
 # --- State ---
 count = 0
-last_a = 0
+h = lgpio.gpiochip_open(0)
 
-def encoder_callback(channel):
-    global count, last_a
-    a = GPIO.input(PIN_A)
-    b = GPIO.input(PIN_B)
+# --- Setup pins ---
+lgpio.gpio_claim_input(h, PIN_A)
+lgpio.gpio_claim_input(h, PIN_B)
 
-    if channel == PIN_A:
-        # Rising edge on A
+# --- Callbacks ---
+def encoder_callback(chip, gpio, level, timestamp):
+    global count
+    a = lgpio.gpio_read(h, PIN_A)
+    b = lgpio.gpio_read(h, PIN_B)
+
+    if gpio == PIN_A:
         if b == 0:
             count += 1
         else:
             count -= 1
-        last_a = a
-    elif channel == PIN_B:
-        # Rising edge on B
+    elif gpio == PIN_B:
         if a == 1:
             count += 1
         else:
             count -= 1
 
-# --- Setup ---
-GPIO.setmode(GPIO.BCM)
-GPIO.setup(PIN_A, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-GPIO.setup(PIN_B, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-
-GPIO.add_event_detect(PIN_A, GPIO.BOTH, callback=encoder_callback)
-GPIO.add_event_detect(PIN_B, GPIO.BOTH, callback=encoder_callback)
+# --- Register edge detection (both edges, like original) ---
+lgpio.gpio_claim_alert(h, PIN_A, lgpio.BOTH_EDGES)
+lgpio.gpio_claim_alert(h, PIN_B, lgpio.BOTH_EDGES)
+cb_a = lgpio.callback(h, PIN_A, lgpio.BOTH_EDGES, encoder_callback)
+cb_b = lgpio.callback(h, PIN_B, lgpio.BOTH_EDGES, encoder_callback)
 
 print("Reading encoder. Press Ctrl+C to stop.")
 print(f"CPR: {CPR} counts/rev at motor shaft\n")
@@ -50,4 +50,6 @@ except KeyboardInterrupt:
     print("\nStopped.")
 
 finally:
-    GPIO.cleanup()
+    cb_a.cancel()
+    cb_b.cancel()
+    lgpio.gpiochip_close(h)

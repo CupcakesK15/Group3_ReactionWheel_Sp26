@@ -1,0 +1,89 @@
+import time
+import math
+import board
+import busio
+import numpy as np
+
+from adafruit_bno08x import (
+    BNO_REPORT_ACCELEROMETER,
+    BNO_REPORT_GYROSCOPE,
+)
+from adafruit_bno08x.i2c import BNO08X_I2C
+
+SAMPLE_INTERVAL = 0.05   # 50ms = 20Hz
+CALIBRATION_SAMPLES = 50 # 2.5 seconds of stillness
+
+# --- Init IMU ---
+i2c = busio.I2C(board.SCL, board.SDA, frequency=400000)
+bno = BNO08X_I2C(i2c)
+bno.enable_feature(BNO_REPORT_ACCELEROMETER)
+bno.enable_feature(BNO_REPORT_GYROSCOPE)
+
+# --- Auto-calibrate: measure gravity vector in sensor frame ---
+print("Hold testbed completely still...")
+samples = []
+for i in range(CALIBRATION_SAMPLES):
+    time.sleep(SAMPLE_INTERVAL)
+    samples.append(bno.acceleration)
+    if (i + 1) % 10 == 0:
+        print(f"  {i + 1}/{CALIBRATION_SAMPLES} samples collected")
+
+gravity_sensor = np.mean(samples, axis=0)
+gravity_norm = np.linalg.norm(gravity_sensor)
+
+tilt_deg = math.degrees(math.acos(abs(gravity_sensor[2]) / gravity_norm))
+print(f"\nCalibration complete:")
+print(f"  Gravity vector (sensor frame): {gravity_sensor}")
+print(f"  Detected tilt: {tilt_deg:.2f}°")
+
+# --- Build rotation matrix from sensor frame -> world frame ---
+# We want a rotation R such that R @ gravity_sensor = [0, 0, -g]
+# This is the rotation that "un-tilts" the sensor.
+# Approach: find the axis and angle using cross product / dot product.
+
+g_hat = gravity_sensor / gravity_norm          # unit vector of measured gravity
+world_z = np.array([0.0, 0.0, -1.0])          # gravity should point down (-Z in world)
+
+cross = np.cross(g_hat, world_z)               # axis of rotation (unnormalized)
+cross_norm = np.linalg.norm(cross)
+
+if cross_norm < 1e-6:
+    # Already aligned, no rotation needed
+    R = np.eye(3)
+    print("  No tilt detected, using identity rotation.")
+else:
+    axis = cross / cross_norm                  # unit rotation axis
+    angle = math.acos(np.clip(np.dot(g_hat, world_z), -1.0, 1.0))
+
+    # Rodrigues' rotation formula
+    K = np.array([
+        [0,        -axis[2],  axis[1]],
+        [axis[2],   0,       -axis[0]],
+        [-axis[1],  axis[0],  0      ]
+    ])
+    R = np.eye(3) + math.sin(angle) * K + (1 - math.cos(angle)) * (K @ K)
+
+print(f"\nReading rotational speed (Ctrl+C to stop)...")
+print("-" * 55)
+
+try:
+    while True:
+        time.sleep(SAMPLE_INTERVAL)
+
+        gx, gy, gz = bno.gyro
+        gyro_sensor = np.array([gx, gy, gz])
+
+        # Rotate gyro vector into world frame
+        gyro_world = R @ gyro_sensor
+
+        # Z component is the true spin-axis rate
+        spin_rads = gyro_world[2]
+        spin_rpm  = spin_rads * (60 / (2 * math.pi))
+
+        print(
+            f"Spin: {spin_rads:+.4f} rad/s  |  {spin_rpm:+7.2f} RPM"
+            f"  [raw: x={gx:+.3f} y={gy:+.3f} z={gz:+.3f}]"
+        )
+
+except KeyboardInterrupt:
+    print("\nStopped.")

@@ -1,114 +1,127 @@
-import RPi.GPIO as GPIO
+import time
 import board
 import busio
-import time
-from adafruit_bno08x import BNO_REPORT_GYROSCOPE
 from adafruit_bno08x.i2c import BNO08X_I2C
+from adafruit_bno08x import BNO_REPORT_GYROSCOPE, BNO_REPORT_ROTATION_VECTOR
+import RPi.GPIO as GPIO
 import math
 
-# --- Pins ---
-MOTOR_PWM_R = 12 # Pin for Forward
-MOTOR_PWM_L = 13 # Pin for Backward
-ENC_A = 17
-ENC_B = 27
+# ─── MOTOR PINS (BTS7960) ───────────────────────────────────────────────────
+RPWM = 12   # Forward PWM
+LPWM = 13   # Reverse PWM
+R_EN = 22   # Forward enable
+L_EN = 23   # Reverse enable
 
-# --- Setup GPIO ---
+# ─── GPIO SETUP ─────────────────────────────────────────────────────────────
 GPIO.setmode(GPIO.BCM)
-GPIO.setup([MOTOR_PWM_R, MOTOR_PWM_L], GPIO.OUT)
-pwm_r = GPIO.PWM(MOTOR_PWM_R, 1000) # 1kHz frequency
-pwm_l = GPIO.PWM(MOTOR_PWM_L, 1000)
-pwm_r.start(0)
-pwm_l.start(0)
+GPIO.setup(RPWM, GPIO.OUT)
+GPIO.setup(LPWM, GPIO.OUT)
+GPIO.setup(R_EN, GPIO.OUT)
+GPIO.setup(L_EN, GPIO.OUT)
 
-# --- Setup IMU ---
-i2c = busio.I2C(board.SCL, board.SDA)
-bno = BNO08X_I2C(i2c)
-bno.enable_feature(BNO_REPORT_GYROSCOPE)
+GPIO.output(R_EN, GPIO.HIGH)
+GPIO.output(L_EN, GPIO.HIGH)
 
-def set_motor(speed):
-    """Speed from -100 to 100"""
+rpwm_pwm = GPIO.PWM(RPWM, 1000)  # 1kHz PWM
+lpwm_pwm = GPIO.PWM(LPWM, 1000)
+rpwm_pwm.start(0)
+lpwm_pwm.start(0)
+
+# ─── IMU SETUP ───────────────────────────────────────────────────────────────
+i2c = busio.I2C(board.SCL, board.SDA, frequency=400000)
+imu = BNO08X_I2C(i2c)
+imu.enable_feature(BNO_REPORT_GYROSCOPE)
+imu.enable_feature(BNO_REPORT_ROTATION_VECTOR)
+
+# ─── MOTOR CONTROL ──────────────────────────────────────────────────────────
+def set_motor(speed: float):
+    """
+    speed: -100.0 to +100.0 (% duty cycle)
+    Positive = flywheel spins one way, negative = other way.
+    """
+    speed = max(-100.0, min(100.0, speed))
     if speed >= 0:
-        pwm_r.ChangeDutyCycle(speed)
-        pwm_l.ChangeDutyCycle(0)
+        rpwm_pwm.ChangeDutyCycle(speed)
+        lpwm_pwm.ChangeDutyCycle(0)
     else:
-        pwm_r.ChangeDutyCycle(0)
-        pwm_l.ChangeDutyCycle(abs(speed))
+        rpwm_pwm.ChangeDutyCycle(0)
+        lpwm_pwm.ChangeDutyCycle(-speed)
 
+def stop_motor():
+    rpwm_pwm.ChangeDutyCycle(0)
+    lpwm_pwm.ChangeDutyCycle(0)
+
+# ─── IMU HELPERS ─────────────────────────────────────────────────────────────
+def quaternion_to_rotation_matrix(quat_i, quat_j, quat_k, quat_real):
+    """Convert quaternion to 3x3 rotation matrix."""
+    w, x, y, z = quat_real, quat_i, quat_j, quat_k
+    R = [
+        [1-2*(y*y+z*z),   2*(x*y-z*w),   2*(x*z+y*w)],
+        [  2*(x*y+z*w), 1-2*(x*x+z*z),   2*(y*z-x*w)],
+        [  2*(x*z-y*w),   2*(y*z+x*w), 1-2*(x*x+y*y)],
+    ]
+    return R
+
+def get_vertical_angular_velocity(imu):
+    """
+    Read gyro (in IMU frame) and rotation vector, then project
+    angular velocity onto the world vertical axis (Z).
+    Returns angular velocity in rad/s about the true vertical.
+    """
+    gyro = imu.gyro                     # (gx, gy, gz) in IMU body frame
+    quat = imu.quaternion               # (i, j, k, real)
+
+    if gyro is None or quat is None:
+        return None
+
+    gx, gy, gz = gyro
+    qi, qj, qk, qr = quat
+
+    # Build rotation matrix: world_frame = R * body_frame
+    R = quaternion_to_rotation_matrix(qi, qj, qk, qr)
+
+    # Rotate the gyro vector into the world frame
+    wx = R[0][0]*gx + R[0][1]*gy + R[0][2]*gz
+    wy = R[1][0]*gx + R[1][1]*gy + R[1][2]*gz
+    wz = R[2][0]*gx + R[2][1]*gy + R[2][2]*gz
+
+    # wz is now the angular velocity about the true world vertical axis
+    return wz
+
+# ─── MAIN LOOP ───────────────────────────────────────────────────────────────
+MOTOR_SPEED = 40.0   # % duty cycle — start gentle, ramp up as needed
+RUN_TIME    = 10.0   # seconds to run
+LOG_INTERVAL = 0.05  # seconds between readings (20 Hz)
+
+print("Starting in 2 seconds — do not disturb the platform...")
+time.sleep(2)
+
+print(f"Spinning flywheel at {MOTOR_SPEED}% duty cycle for {RUN_TIME}s")
+set_motor(MOTOR_SPEED)
+
+start = time.time()
 try:
-    print("Ramping up motor... watch the platform spin opposite!")
-    for s in range(0, 50, 5): # Ramp up to 50% power
-        set_motor(s)
-        time.sleep(0.5)
-        
-        # Inside your loop:
-        gyro_x, gyro_y, gyro_z = bno.gyro
+    while time.time() - start < RUN_TIME:
+        t0 = time.time()
 
-        # Calculate the absolute rotational speed (magnitude)
-        # This ignores the tilt angle entirely!
-        actual_rotational_speed = math.sqrt(gyro_x**2 + gyro_y**2 + gyro_z**2)
+        omega_z = get_vertical_angular_velocity(imu)
 
-        # If you need to know direction (Clockwise vs Counter-Clockwise):
-        # Use the sign of the Z axis to determine direction
-        if gyro_z < 0:
-            actual_rotational_speed *= -1
+        if omega_z is not None:
+            omega_deg = math.degrees(omega_z)
+            print(f"t={time.time()-start:5.2f}s | "
+                  f"Platform ω = {omega_z:+7.4f} rad/s  ({omega_deg:+7.2f} °/s)")
 
-        print(f"Platform Speed (Tilt-Compensated): {actual_rotational_speed:.4f} rad/s")
+        # Pace the loop
+        elapsed = time.time() - t0
+        if elapsed < LOG_INTERVAL:
+            time.sleep(LOG_INTERVAL - elapsed)
 
-    time.sleep(2)
-    set_motor(0)
+except KeyboardInterrupt:
+    print("\nInterrupted by user.")
 
 finally:
-    pwm_r.stop()
-    pwm_l.stop()
+    print("Stopping motor and cleaning up.")
+    stop_motor()
+    rpwm_pwm.stop()
+    lpwm_pwm.stop()
     GPIO.cleanup()
-
-
-
-# import RPi.GPIO as GPIO
-# import time
-# import board
-# from adafruit_bno08x import BNO_REPORT_GYROSCOPE
-# from adafruit_bno08x.i2c import BNO08X_I2C
-
-# # --- Hardware Config ---
-# CPR = 14 
-# PWM_PIN = 12 # BTS7960 RPWM
-# DIR_PIN = 13 # BTS7960 LPWM
-
-# # --- Variables ---
-# target_velocity = 0.5 # rad/s
-# current_pwm = 0
-
-# # --- Setup ---
-# i2c = busio.I2C(board.SCL, board.SDA)
-# bno = BNO08X_I2C(i2c)
-# bno.enable_feature(BNO_REPORT_GYROSCOPE)
-
-# GPIO.setmode(GPIO.BCM)
-# GPIO.setup([PWM_PIN, DIR_PIN], GPIO.OUT)
-# motor_pwm = GPIO.PWM(PWM_PIN, 1000)
-# motor_pwm.start(0)
-
-# def control_loop():
-#     global current_pwm
-#     try:
-#         while True:
-#             # Get current speed from IMU
-#             _, _, gyro_z = bno.gyro 
-            
-#             # Simple Proportional Control (P-Loop)
-#             error = target_velocity - gyro_z
-#             current_pwm += (error * 0.1) # Adjust 0.1 to tune sensitivity
-            
-#             # Clamp PWM between 0 and 100
-#             current_pwm = max(0, min(100, current_pwm))
-            
-#             motor_pwm.ChangeDutyCycle(current_pwm)
-            
-#             print(f"Goal: {target_velocity} | Actual: {gyro_z:.2f} | PWM: {current_pwm:.1f}", end='\r')
-#             time.sleep(0.02)
-#     except KeyboardInterrupt:
-#         motor_pwm.stop()
-#         GPIO.cleanup()
-
-# control_loop()

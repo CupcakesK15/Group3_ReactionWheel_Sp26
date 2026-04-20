@@ -1,0 +1,560 @@
+# Demo Part 2: Track an object with a camera mounted on the testbed platform
+# We basically did this in a few different steps: 
+#   1. Calibrate the camera to detect the object. This allows us to detect a range of objects. 
+#       - we can turn this calibration sequence off and manually input values too if we need to
+#   2. See if the ball is in sight. If it is, hold onto it, if not, move to find it. 
+#       - we can implement a thingy to detect if we need to turn right or left (from camera POV) 
+#         depending on where in the camera's field of view we see the object, IF we see any speck of it
+#           - do this by uncommenting all the stuff mentioned in the TODOs scattered throughout the code
+import time
+import math
+import threading
+import cv2
+import numpy as np
+import board
+import busio
+from adafruit_bno08x.i2c import BNO08X_I2C
+from adafruit_bno08x import BNO_REPORT_GYROSCOPE, BNO_REPORT_ROTATION_VECTOR
+from gpiozero import PWMOutputDevice, OutputDevice, RotaryEncoder
+from gpiozero.pins.lgpio import LGPIOFactory
+from gpiozero import Device
+
+# ─── PIN FACTORY ──────────────────────────────────────────────────────────────
+Device.pin_factory = LGPIOFactory()
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TUNING — edit these before running
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# --- Motor & Encoder ---
+RPWM_PIN      = 12
+LPWM_PIN      = 13
+R_EN_PIN      = 22
+L_EN_PIN      = 23
+ENC_A_PIN     = 5
+ENC_B_PIN     = 6
+TICKS_PER_REV = 14          # 4 × CPR of your encoder
+
+# --- Stabiliser PID ---
+#TODO: update with the values from demo part 1
+Kp = 15.0
+Ki = 0.5
+Kd = 2.0
+DEAD_BAND_RAD_S = 0.01      # rad/s — ignore platform noise below this
+MAX_DUTY        = 80.0      # % — safety cap on motor output
+
+# --- Search behaviour ---
+SEARCH_DUTY     = 20.0      # % duty cycle to spin platform during search
+#   Positive = one direction, negative = the other.
+#   Flip the sign if it spins the wrong way.
+
+# #TODO: uncomment this if we want to work with smart searching
+# # ── SMART SEARCH ZONES ──────────────────────────────────────────────────────
+# # Side zones use a lower threshold since the ball is only partially in frame
+# # LEFT_ZONE and RIGHT_ZONE are fractions of frame width
+# SIDE_ZONE_W_FRAC   = 0.20   # each side zone is 20% of frame width
+# SIDE_FILL_THRESHOLD = 0.06  # 6% fill triggers a hint (lower than centre's 20%)
+
+# --- Camera ---
+CAMERA_INDEX    = 0         # usually 0 for the Arducam; try 1 if not found
+FRAME_WIDTH     = 640
+FRAME_HEIGHT    = 480
+
+# --- Detection box (centre of frame) ---
+#   The detector looks inside a rectangle in the middle of the image.
+#   These values are fractions of the full frame size (0.0 – 1.0).
+BOX_W_FRAC      = 0.40      # box is 40% of frame width
+BOX_H_FRAC      = 0.40      # box is 40% of frame height
+FILL_THRESHOLD  = 0.20      # 20% of box must be target colour to trigger lock
+
+# --- HSV colour range (set by calibration, or override manually) ---
+#   If you want to skip calibration and hard-code values, set
+#   MANUAL_HSV = True and fill in the ranges below.
+#TODO: maybe detect the object once, the first time I run it, then switch out the values and change to true
+MANUAL_HSV      = False
+HSV_LOWER       = np.array([ 25,  80,  80], dtype=np.uint8)  # yellowish default
+HSV_UPPER       = np.array([ 65, 255, 255], dtype=np.uint8)
+
+# --- Loop timing ---
+CONTROL_HZ      = 50        # stabiliser loop rate
+CONTROL_PERIOD  = 1.0 / CONTROL_HZ
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# HARDWARE INIT
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Motor driver
+rpwm  = PWMOutputDevice(RPWM_PIN, frequency=1000)
+lpwm  = PWMOutputDevice(LPWM_PIN, frequency=1000)
+r_en  = OutputDevice(R_EN_PIN, initial_value=True)
+l_en  = OutputDevice(L_EN_PIN, initial_value=True)
+
+# Encoder
+encoder      = RotaryEncoder(ENC_A_PIN, ENC_B_PIN, max_steps=0)
+_last_steps  = 0
+_last_enc_t  = time.time()
+
+# IMU
+i2c = busio.I2C(board.SCL, board.SDA, frequency=400000)
+imu = BNO08X_I2C(i2c)
+imu.enable_feature(BNO_REPORT_GYROSCOPE)
+imu.enable_feature(BNO_REPORT_ROTATION_VECTOR)
+
+# Camera
+cap = cv2.VideoCapture(CAMERA_INDEX)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH,  FRAME_WIDTH)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
+if not cap.isOpened():
+    raise RuntimeError(f"Could not open camera at index {CAMERA_INDEX}")
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MOTOR CONTROL
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def set_motor(duty: float):
+    """duty: -100 to +100 percent."""
+    duty = max(-100.0, min(100.0, duty)) / 100.0
+    if duty >= 0:
+        rpwm.value = duty
+        lpwm.value = 0.0
+    else:
+        rpwm.value = 0.0
+        lpwm.value = -duty
+
+def stop_motor():
+    rpwm.value = 0.0
+    lpwm.value = 0.0
+
+def cleanup():
+    stop_motor()
+    rpwm.close(); lpwm.close()
+    r_en.close(); l_en.close()
+    encoder.close()
+    cap.release()
+    cv2.destroyAllWindows()
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ENCODER
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def get_flywheel_rpm() -> float:
+    global _last_steps, _last_enc_t
+    now   = time.time()
+    dt    = now - _last_enc_t
+    steps = encoder.steps
+    ticks = steps - _last_steps
+    _last_steps = steps
+    _last_enc_t = now
+    if dt <= 0:
+        return 0.0
+    return (ticks / TICKS_PER_REV / dt) * 60.0
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# IMU
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _quat_to_R(qi, qj, qk, qr):
+    w, x, y, z = qr, qi, qj, qk
+    return [
+        [1-2*(y*y+z*z),   2*(x*y-z*w),   2*(x*z+y*w)],
+        [  2*(x*y+z*w), 1-2*(x*x+z*z),   2*(y*z-x*w)],
+        [  2*(x*z-y*w),   2*(y*z+x*w), 1-2*(x*x+y*y)],
+    ]
+
+def get_platform_omega_z() -> float | None:
+    gyro = imu.gyro
+    quat = imu.quaternion
+    if gyro is None or quat is None:
+        return None
+    gx, gy, gz = gyro
+    qi, qj, qk, qr = quat
+    R = _quat_to_R(qi, qj, qk, qr)
+    return R[2][0]*gx + R[2][1]*gy + R[2][2]*gz
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PID
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class PID:
+    def __init__(self, kp, ki, kd, limit=100.0):
+        self.kp = kp; self.ki = ki; self.kd = kd
+        self.limit = limit
+        self._integral = 0.0
+        self._prev_error = 0.0
+        self._prev_time  = None
+
+    def reset(self):
+        self._integral   = 0.0
+        self._prev_error = 0.0
+        self._prev_time  = None
+
+    def compute(self, error: float) -> float:
+        now = time.time()
+        dt  = (now - self._prev_time) if self._prev_time else CONTROL_PERIOD
+        dt  = max(dt, 1e-6)
+        self._prev_time = now
+
+        p = self.kp * error
+
+        self._integral += error * dt
+        max_i = self.limit / max(self.ki, 1e-9)
+        self._integral = max(-max_i, min(max_i, self._integral))
+        i = self.ki * self._integral
+
+        d = self.kd * (error - self._prev_error) / dt
+        self._prev_error = error
+
+        return max(-self.limit, min(self.limit, p + i + d))
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CAMERA — shared state updated by a background thread
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Detection result shared between camera thread and control loop
+_cam_lock         = threading.Lock()
+_ball_detected    = False       # True when fill % exceeds threshold
+_ball_fill_pct    = 0.0         # fraction of box filled with target colour
+_latest_frame     = None        # annotated frame for display
+# #TODO: uncomment these to implement smart searching
+# _left_detected  = False
+# _right_detected = False
+
+def _build_detection_box():
+    """Return (x1, y1, x2, y2) pixel coords of the detection box."""
+    bw = int(FRAME_WIDTH  * BOX_W_FRAC)
+    bh = int(FRAME_HEIGHT * BOX_H_FRAC)
+    cx = FRAME_WIDTH  // 2
+    cy = FRAME_HEIGHT // 2
+    return (cx - bw//2, cy - bh//2, cx + bw//2, cy + bh//2)
+
+BOX = _build_detection_box()
+
+# #TODO: delete _build_detection_box and BOX = ... and uncomment this for smart searching
+# # ── ZONE BUILDER ─────────────────────────────────────────────────────────────
+# def _build_zones():
+#     # Centre lock zone (same as before)
+#     bw = int(FRAME_WIDTH  * BOX_W_FRAC)
+#     bh = int(FRAME_HEIGHT * BOX_H_FRAC)
+#     cx = FRAME_WIDTH  // 2
+#     cy = FRAME_HEIGHT // 2
+#     centre = (cx - bw//2, cy - bh//2, cx + bw//2, cy + bh//2)
+
+#     # Side hint zones — same height as centre, flanking it on each side
+#     sw = int(FRAME_WIDTH * SIDE_ZONE_W_FRAC)
+#     y1 = cy - bh//2
+#     y2 = cy + bh//2
+#     left  = (0,              y1, sw,           y2)
+#     right = (FRAME_WIDTH-sw, y1, FRAME_WIDTH,  y2)
+
+#     return centre, left, right
+
+# BOX, LEFT_ZONE, RIGHT_ZONE = _build_zones()
+
+#TODO: uncomment this method to implement smart searching (also mentioned below when building the zones)
+# def _check_zone(frame, zone, threshold):
+#     """Returns (detected: bool, fill_pct: float) for a given zone rect."""
+#     x1, y1, x2, y2 = zone
+#     roi  = frame[y1:y2, x1:x2]
+#     hsv  = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+#     mask = cv2.inRange(hsv, HSV_LOWER, HSV_UPPER)
+#     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+#     mask   = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  kernel)
+#     mask   = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+#     total  = (x2 - x1) * (y2 - y1)
+#     filled = int(np.sum(mask > 0))
+#     fill   = filled / total if total > 0 else 0.0
+#     return fill >= threshold, fill
+
+def camera_thread_fn():
+    """Runs in background. Continuously reads frames and updates detection state."""
+    global _ball_detected, _ball_fill_pct, _latest_frame
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            time.sleep(0.01)
+            continue
+
+        #TODO: starting here and ending ---
+        x1, y1, x2, y2 = BOX
+        roi = frame[y1:y2, x1:x2]
+
+        # Convert ROI to HSV and threshold
+        hsv  = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+        mask = cv2.inRange(hsv, HSV_LOWER, HSV_UPPER)
+
+        # Clean up noise with morphological ops
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        mask   = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  kernel)
+        mask   = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+
+        total_pixels  = (x2 - x1) * (y2 - y1)
+        filled_pixels = int(np.sum(mask > 0))
+        fill_pct      = filled_pixels / total_pixels if total_pixels > 0 else 0.0
+        detected      = fill_pct >= FILL_THRESHOLD
+        #TODO: --- here, delete and replace with the commented section below
+        # centre_det, fill_pct = _check_zone(frame, BOX,        FILL_THRESHOLD)
+        # left_det,   left_fill = _check_zone(frame, LEFT_ZONE,  SIDE_FILL_THRESHOLD)
+        # right_det, right_fill = _check_zone(frame, RIGHT_ZONE, SIDE_FILL_THRESHOLD)
+        # detected = centre_det  # lock only triggers from centre
+        #TODO: also, uncomment the method added, _check_zone
+
+        # Annotate frame for display
+        colour = (0, 255, 0) if detected else (0, 0, 255)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), colour, 2)
+        label = f"{'LOCKED' if detected else 'SEARCHING'}  fill={fill_pct*100:.1f}%"
+        cv2.putText(frame, label, (x1, y1 - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, colour, 2)
+
+        #TODO: replace this code below
+        with _cam_lock:
+            _ball_detected = detected
+            _ball_fill_pct = fill_pct
+            _latest_frame  = frame.copy()
+        #TODO: with the commented out code below
+        # lx1,ly1,lx2,ly2 = LEFT_ZONE
+        # rx1,ry1,rx2,ry2 = RIGHT_ZONE
+        # left_colour  = (0, 200, 255) if left_det  else (80, 80, 80)
+        # right_colour = (0, 200, 255) if right_det else (80, 80, 80)
+        # cv2.rectangle(frame, (lx1, ly1), (lx2, ly2), left_colour,  1)
+        # cv2.rectangle(frame, (rx1, ry1), (rx2, ry2), right_colour, 1)
+        # cv2.putText(frame, f"L:{left_fill*100:.0f}%",  (lx1+4, ly1+16),
+        #             cv2.FONT_HERSHEY_SIMPLEX, 0.45, left_colour,  1)
+        # cv2.putText(frame, f"R:{right_fill*100:.0f}%", (rx1+4, ry1+16),
+        #             cv2.FONT_HERSHEY_SIMPLEX, 0.45, right_colour, 1)
+
+        # with _cam_lock:
+        #     _ball_detected  = detected
+        #     _ball_fill_pct  = fill_pct
+        #     _left_detected  = left_det
+        #     _right_detected = right_det
+        #     _latest_frame   = frame.copy()
+
+#TODO: replace this get_detection with the commented out get_detection
+def get_detection() -> tuple[bool, float]:
+    with _cam_lock:
+        return _ball_detected, _ball_fill_pct
+# def get_detection() -> tuple[bool, float, bool, bool]:
+#     """Returns (centre_detected, fill_pct, left_detected, right_detected)"""
+#     with _cam_lock:
+#         return _ball_detected, _ball_fill_pct, _left_detected, _right_detected
+
+def get_latest_frame():
+    with _cam_lock:
+        return _latest_frame
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# COLOUR CALIBRATION
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def calibrate_colour():
+    """
+    Shows a live feed with a small crosshair box in the centre.
+    Press SPACE to sample the colour under the box, then ENTER to confirm.
+    The HSV range is built automatically by adding a tolerance around the sample.
+    """
+    global HSV_LOWER, HSV_UPPER
+
+    SAMPLE_R = 20   # radius of sampling square (pixels)
+    cx, cy   = FRAME_WIDTH // 2, FRAME_HEIGHT // 2
+    samples  = []
+
+    print("\n── COLOUR CALIBRATION ──────────────────────────────────────────")
+    print("  Point the camera at the target object.")
+    print("  Press SPACE to sample colour (sample multiple times for better range).")
+    print("  Press ENTER to finish and continue.\n")
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            continue
+
+        # Draw sampling box
+        cv2.rectangle(frame,
+                      (cx - SAMPLE_R, cy - SAMPLE_R),
+                      (cx + SAMPLE_R, cy + SAMPLE_R),
+                      (255, 255, 0), 2)
+        cv2.putText(frame, "SPACE=sample  ENTER=done", (10, 25),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+
+        if samples:
+            cv2.putText(frame, f"{len(samples)} sample(s) taken", (10, 55),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
+        cv2.imshow("Calibration", frame)
+        key = cv2.waitKey(1) & 0xFF
+
+        if key == ord(' '):
+            roi  = frame[cy-SAMPLE_R:cy+SAMPLE_R, cx-SAMPLE_R:cx+SAMPLE_R]
+            hsv  = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+            mean = cv2.mean(hsv)[:3]
+            samples.append(mean)
+            print(f"  Sampled HSV: H={mean[0]:.1f}  S={mean[1]:.1f}  V={mean[2]:.1f}")
+
+        elif key == 13 and samples:   # ENTER
+            break
+
+    cv2.destroyWindow("Calibration")
+
+    # Build range from all samples + tolerance
+    H_TOL, S_TOL, V_TOL = 15, 60, 60
+    h_vals = [s[0] for s in samples]
+    s_vals = [s[1] for s in samples]
+    v_vals = [s[2] for s in samples]
+
+    HSV_LOWER = np.array([
+        max(0,   min(h_vals) - H_TOL),
+        max(0,   min(s_vals) - S_TOL),
+        max(0,   min(v_vals) - V_TOL),
+    ], dtype=np.uint8)
+    HSV_UPPER = np.array([
+        min(179, max(h_vals) + H_TOL),
+        255,
+        255,
+    ], dtype=np.uint8)
+
+    print(f"\n  HSV_LOWER = {HSV_LOWER}")
+    print(f"  HSV_UPPER = {HSV_UPPER}")
+    print("────────────────────────────────────────────────────────────────\n")
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MAIN — state machine + control loop
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# States
+SEARCH = "SEARCH"   # spinning slowly, looking for ball
+LOCKED = "LOCKED"   # ball found, stabiliser holds position
+LOST   = "LOST"     # ball was locked but disappeared — re-search
+
+# How many consecutive "not detected" frames before dropping lock
+LOST_FRAMES_THRESHOLD = 15
+
+def main():
+    # ── Calibration ──────────────────────────────────────────────────────────
+    if not MANUAL_HSV:
+        calibrate_colour()
+    else:
+        print(f"Using manual HSV range: {HSV_LOWER} → {HSV_UPPER}")
+
+    # ── Start camera thread ───────────────────────────────────────────────────
+    cam_thread = threading.Thread(target=camera_thread_fn, daemon=True)
+    cam_thread.start()
+    print("Camera thread started.")
+
+    # ── Warm up IMU ──────────────────────────────────────────────────────────
+    print("Warming up IMU for 3 seconds — keep platform still...")
+    time.sleep(3)
+
+    pid         = PID(Kp, Ki, Kd, limit=MAX_DUTY)
+    state       = SEARCH
+    lost_count  = 0
+
+    print(f"\nStarting in state: {SEARCH}")
+    print(f"{'Time':>7} | {'State':>8} | {'ω_z (rad/s)':>12} | "
+          f"{'Fill %':>7} | {'Motor %':>8}")
+    print("-" * 56)
+
+    try:
+        while True:
+            t0 = time.time()
+
+            # ── Read sensors ──────────────────────────────────────────────
+            omega_z  = get_platform_omega_z()
+            detected, fill_pct = get_detection()
+            #TODO: replace the line right above with the line right below
+            #detected, fill_pct, left_det, right_det = get_detection()
+
+            if omega_z is None:
+                time.sleep(0.005)
+                continue
+
+            # ── State machine ─────────────────────────────────────────────
+            if state == SEARCH:
+                lost_count = 0
+                pid.reset()
+
+                if detected:
+                    # Ball found — transition to LOCKED
+                    state = LOCKED
+                    stop_motor()
+                    pid.reset()
+                    print(f"\n  ★ Ball found! Switching to LOCKED (fill={fill_pct*100:.1f}%)")
+                    motor_out = 0.0
+                #TODO: uncomment this stuff and get rid of the original else for smart searching
+                # elif left_det and not right_det:
+                #     set_motor(-SEARCH_DUTY)   # ball is left of centre — spin left
+                #     motor_out = -SEARCH_DUTY
+                # elif right_det and not left_det:
+                #     set_motor(+SEARCH_DUTY)   # ball is right of centre — spin right
+                #     motor_out = +SEARCH_DUTY
+                # else:
+                #     set_motor(+SEARCH_DUTY)   # nothing visible — default spin
+                #     motor_out = +SEARCH_DUTY
+                else:
+                    # Keep spinning to scan
+                    set_motor(SEARCH_DUTY)
+                    motor_out = SEARCH_DUTY
+
+            elif state == LOCKED:
+                if not detected:
+                    lost_count += 1
+                    if lost_count >= LOST_FRAMES_THRESHOLD:
+                        state = LOST
+                        print(f"\n  ✗ Ball lost! Switching to SEARCH")
+                else:
+                    lost_count = 0
+
+                # Stabiliser holds position regardless of whether ball is
+                # momentarily obscured (within the LOST_FRAMES window)
+                if abs(omega_z) < DEAD_BAND_RAD_S:
+                    pid.reset()
+                    stop_motor()
+                    motor_out = 0.0
+                else:
+                    error     = -omega_z
+                    motor_out = pid.compute(error)
+                    set_motor(motor_out)
+
+            elif state == LOST:
+                # Brief pause, then go back to searching
+                stop_motor()
+                time.sleep(0.5)
+                pid.reset()
+                state      = SEARCH
+                lost_count = 0
+                motor_out  = 0.0
+
+            # ── Display ───────────────────────────────────────────────────
+            frame = get_latest_frame()
+            if frame is not None:
+                # Overlay state info on frame
+                state_colour = (0, 255, 0) if state == LOCKED else (0, 165, 255)
+                cv2.putText(frame, f"State: {state}", (10, FRAME_HEIGHT - 40),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.65, state_colour, 2)
+                cv2.putText(frame, f"omega_z: {math.degrees(omega_z):+.2f} deg/s",
+                            (10, FRAME_HEIGHT - 15),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
+                cv2.imshow("Reaction Wheel Tracker", frame)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    print("\nQ pressed — quitting.")
+                    break
+
+            # ── Console log ───────────────────────────────────────────────
+            print(f"{time.time():>7.2f} | {state:>8} | {omega_z:>+12.4f} | "
+                  f"{fill_pct*100:>6.1f}% | {motor_out:>+8.1f}",
+                  end="\r")
+
+            # ── Pace loop ─────────────────────────────────────────────────
+            elapsed = time.time() - t0
+            if CONTROL_PERIOD - elapsed > 0:
+                time.sleep(CONTROL_PERIOD - elapsed)
+
+    except KeyboardInterrupt:
+        print("\n\nInterrupted — shutting down.")
+
+    finally:
+        cleanup()
+        print("Done.")
+
+if __name__ == "__main__":
+    main()

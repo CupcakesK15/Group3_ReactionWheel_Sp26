@@ -1,3 +1,7 @@
+# Code for Checkpoint 2: Rotate the flywheel at a given speed and print out the rotational speed from the imu. 
+# We basically did this by calibrating the imu to account for the tilt (mainly just rotating the rotation to be in 
+# the correct frame) then printing out the speed calculated from the imu when the motor would spin the flywheel
+
 import time
 import board
 import busio
@@ -112,30 +116,6 @@ try:
         elapsed = time.time() - t0
         if elapsed < LOG_INTERVAL:
             time.sleep(LOG_INTERVAL - elapsed)
-
-print("5 seconds of downtime — do not disturb the platform...")
-time.sleep(2)
-
-print(f"Spinning flywheel at {MOTOR_SPEED}% duty cycle for {RUN_TIME}s")
-set_motor(MOTOR_SPEED)
-
-start = time.time()
-try:
-    while time.time() - start < RUN_TIME:
-        t0 = time.time()
-
-        omega_z = get_vertical_angular_velocity(imu)
-
-        if omega_z is not None:
-            omega_deg = math.degrees(omega_z)
-            print(f"t={time.time()-start:5.2f}s | "
-                  f"Platform ω = {omega_z:+7.4f} rad/s  ({omega_deg:+7.2f} °/s)")
-
-        # Pace the loop
-        elapsed = time.time() - t0
-        if elapsed < LOG_INTERVAL:
-            time.sleep(LOG_INTERVAL - elapsed)
-
 
 except KeyboardInterrupt:
     print("\nInterrupted by user.")

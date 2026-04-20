@@ -1,3 +1,7 @@
+# Code for Checkpoint 1: Rotate the flywheel at a given speed and keep it constant. 
+# We basically did this by using encoder outputs to calculate the speed of the motor, then adjust the power as needed to 
+# ensure that the speed was what we were aiming for. 
+
 from gpiozero import PWMOutputDevice, OutputDevice, RotaryEncoder
 from gpiozero.pins.lgpio import LGPIOFactory
 from gpiozero import Device

@@ -30,9 +30,9 @@ TICKS_PER_REV = 14       # Just use CPR from previous ones directly here because
 #   Kp: primary "push back" strength. Increase if response is sluggish.
 #   Ki: corrects steady-state drift (residual spin). Increase slowly.
 #   Kd: damps oscillation / overshoot. Increase if platform oscillates.
-Kp = 5.0 #TODO: 1. mess with this till it is good
-Ki = 0.5 #TODO: 3. make TINY ASS changes if it drifts over time
-Kd = 2.0 #TODO: 2. increase this to reduce oscillations of the platform as it corrects
+Kp = 35.0 #TODO: 1. mess with this till it is good
+Ki = 4.0 #TODO: 3. make TINY ASS changes if it drifts over time
+Kd = 0.0 #TODO: 2. increase this to reduce oscillations of the platform as it corrects
 
 # Dead band: ignore platform velocities smaller than this (rad/s).
 # Prevents the motor from buzzing when the platform is essentially still.
@@ -60,7 +60,7 @@ _last_steps = 0
 _last_enc_t = time.time()
 
 # IMU
-i2c = busio.I2C(board.SCL, board.SDA, frequency=400000)
+i2c = busio.I2C(board.SCL, board.SDA, frequency=100000)
 imu = BNO08X_I2C(i2c)
 imu.enable_feature(BNO_REPORT_GYROSCOPE)
 imu.enable_feature(BNO_REPORT_ROTATION_VECTOR)
@@ -83,6 +83,8 @@ def set_motor(duty: float):
 def stop_motor():
     rpwm.value = 0.0
     lpwm.value = 0.0
+    r_en.value = 1.0
+    l_en.value = 1.0
 
 def cleanup():
     stop_motor()

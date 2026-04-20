@@ -90,7 +90,7 @@ def get_vertical_angular_velocity(imu):
     return wz
 
 # ─── MAIN LOOP ───────────────────────────────────────────────────────────────
-MOTOR_SPEED = 5.0    # % duty cycle — start gentle, ramp up as needed
+MOTOR_SPEED = 10.0    # % duty cycle — start gentle, ramp up as needed
 RUN_TIME    = 10.0    # seconds to run
 LOG_INTERVAL = 0.05   # seconds between readings (20 Hz)
 

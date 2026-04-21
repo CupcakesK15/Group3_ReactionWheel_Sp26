@@ -17,7 +17,7 @@ L_EN = 23
 ENC_A = 5
 ENC_B = 6
 
-TICKS_PER_REV = 14  # CHANGE THIS: 4 × your encoder's CPR (e.g. 11 CPR × 4 = 44)
+TICKS_PER_REV = 14  #Technically should be 28, but our's is a little special
 
 # --- Motor Setup ---
 rpwm = PWMOutputDevice(RPWM, frequency=1000)

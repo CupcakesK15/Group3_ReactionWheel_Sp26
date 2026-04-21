@@ -38,4 +38,4 @@ If you have VSCode on a laptop set up and want to ssh in do this:
 - When it prompts for password, type in beststream (all lowercase, no spaces)
 - Click Open Folder, the folder is called Group3_ReactionWheel_SP26 (should be in the fri folder or something like that)
     - it might prompt for the password again
-- 
+- switch branches (git switch master)

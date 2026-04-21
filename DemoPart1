@@ -30,14 +30,14 @@ TICKS_PER_REV = 14       # Just use CPR from previous ones directly here because
 #   Kp: primary "push back" strength. Increase if response is sluggish.
 #   Ki: corrects steady-state drift (residual spin). Increase slowly.
 #   Kd: damps oscillation / overshoot. Increase if platform oscillates.
-Kp = 34.5 #TODO: 1. mess with this till it is good
-Ki = 6.0 #5.5 #TODO: 3. make TINY ASS changes if it drifts over time
-Kd = 1.1 #TODO: 2. increase this to reduce oscillations of the platform as it corrects
+Kp = 50.0 #TODO: 1. mess with this till it is good
+Ki = 5.4 #5.5 #TODO: 3. make TINY ASS changes if it drifts over time
+Kd = 0.9 #TODO: 2. increase this to reduce oscillations of the platform as it corrects
 
 # Dead band: ignore platform velocities smaller than this (rad/s).
 # Prevents the motor from buzzing when the platform is essentially still.
 # Typical gyro noise floor is ~0.002–0.005 rad/s; set above that.
-DEAD_BAND_RAD_S = 0.025 #TODO: check this and see if this is too small
+DEAD_BAND_RAD_S = 0.007 #TODO: check this and see if this is too small
 
 # Safety cap on motor duty cycle output (0–100%).
 # Keeps the flywheel from hitting mechanical limits while tuning PID.
@@ -85,6 +85,7 @@ def stop_motor():
     lpwm.value = 0.0
     r_en.value = 1.0
     l_en.value = 1.0
+    #TODO: apply a smidge of negative power to actually stop the flywheel
 
 def cleanup():
     stop_motor()

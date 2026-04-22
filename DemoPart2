@@ -37,10 +37,10 @@ TICKS_PER_REV = 14          # 4 × CPR of your encoder
 
 # --- Stabiliser PID ---
 #TODO: update with the values from demo part 1
-Kp = 15.0
+Kp = 45.0
 Ki = 0.5
-Kd = 2.0
-DEAD_BAND_RAD_S = 0.01      # rad/s — ignore platform noise below this
+Kd = 0.55
+DEAD_BAND_RAD_S = 0.007      # rad/s — ignore platform noise below this
 MAX_DUTY        = 80.0      # % — safety cap on motor output
 
 # --- Search behaviour ---
@@ -124,8 +124,8 @@ def set_motor(duty: float):
 def stop_motor():
     rpwm.value = 0.0
     lpwm.value = 0.0
-    r_en.value = 1.0
-    l_en.value = 1.0
+    # r_en.value = 1.0
+    # l_en.value = 1.0
 
 # def stop_motor():
 #     """

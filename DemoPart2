@@ -6,6 +6,9 @@
 #       - we can implement a thingy to detect if we need to turn right or left (from camera POV) 
 #         depending on where in the camera's field of view we see the object, IF we see any speck of it
 #           - do this by uncommenting all the stuff mentioned in the TODOs scattered throughout the code
+
+#TODO to detect camera: check if wire is plugged in correct orientation, see if there's a pin mismatch
+
 import time
 import math
 import threading

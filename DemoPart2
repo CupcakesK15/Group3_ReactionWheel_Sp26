@@ -121,31 +121,34 @@ def set_motor(duty: float):
         rpwm.value = 0.0
         lpwm.value = -duty
 
-# def stop_motor():
-#     rpwm.value = 0.0
-#     lpwm.value = 0.0
 def stop_motor():
-    """
-    Active brake: briefly apply reverse power to fight flywheel inertia,
-    then cut to passive brake.
-    """
-    BRAKE_DUTY = 0.15  #TODO: copy value from Part1 # 15% reverse — tune to match Demo Part 1
-    BRAKE_TIME = 0.08  #TODO: copy value from Part1 # seconds — tune to match Demo Part 1
-
-    current_rpm = get_flywheel_rpm()
-    if abs(current_rpm) > 5.0:
-        if current_rpm > 0:
-            rpwm.value = 0.0
-            lpwm.value = BRAKE_DUTY
-        else:
-            rpwm.value = BRAKE_DUTY
-            lpwm.value = 0.0
-        time.sleep(BRAKE_TIME)
-
     rpwm.value = 0.0
     lpwm.value = 0.0
     r_en.value = 1.0
     l_en.value = 1.0
+
+# def stop_motor():
+#     """
+#     Active brake: briefly apply reverse power to fight flywheel inertia,
+#     then cut to passive brake.
+#     """
+#     BRAKE_DUTY = 0.15  #TODO: copy value from Part1 # 15% reverse — tune to match Demo Part 1
+#     BRAKE_TIME = 0.08  #TODO: copy value from Part1 # seconds — tune to match Demo Part 1
+
+#     current_rpm = get_flywheel_rpm()
+#     if abs(current_rpm) > 5.0:
+#         if current_rpm > 0:
+#             rpwm.value = 0.0
+#             lpwm.value = BRAKE_DUTY
+#         else:
+#             rpwm.value = BRAKE_DUTY
+#             lpwm.value = 0.0
+#         time.sleep(BRAKE_TIME)
+
+#     rpwm.value = 0.0
+#     lpwm.value = 0.0
+#     r_en.value = 1.0
+#     l_en.value = 1.0
 
 def cleanup():
     stop_motor()

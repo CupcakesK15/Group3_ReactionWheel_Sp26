@@ -30,9 +30,9 @@ TICKS_PER_REV = 14       # Just use CPR from previous ones directly here because
 #   Kp: primary "push back" strength. Increase if response is sluggish.
 #   Ki: corrects steady-state drift (residual spin). Increase slowly.
 #   Kd: damps oscillation / overshoot. Increase if platform oscillates.
-Kp = 50.0 #TODO: 1. mess with this till it is good
-Ki = 5.4 #5.5 #TODO: 3. make TINY ASS changes if it drifts over time
-Kd = 0.9 #TODO: 2. increase this to reduce oscillations of the platform as it corrects
+Kp = 45.0 #TODO: 1. mess with this till it is good
+Ki = 0.5 #5.4 #5.5 #TODO: 3. make TINY ASS changes if it drifts over time
+Kd = 0.55 #0.9 #TODO: 2. increase this to reduce oscillations of the platform as it corrects
 
 # Dead band: ignore platform velocities smaller than this (rad/s).
 # Prevents the motor from buzzing when the platform is essentially still.
@@ -80,40 +80,41 @@ def set_motor(duty: float):
         rpwm.value = 0.0
         lpwm.value = -duty
 
+def stop_motor():
+    rpwm.value = 0.0
+    lpwm.value = 0.0
+    # r_en.value = 1.0
+    # l_en.value = 1.0
+
+#     #apply a smidge of negative power to actually stop the flywheel - no worky
 # def stop_motor():
+#     """
+#     Active brake: briefly apply reverse power to fight flywheel inertia,
+#     then cut to passive brake (EN pins high, PWM low).
+#     """
+#     BRAKE_DUTY    = 0.1   # 15% reverse — tune this up/down as needed
+#     BRAKE_TIME    = 0.5   # seconds to hold reverse — tune this too
+
+#     # Figure out which way the flywheel is currently spinning
+#     # so we can push against it
+#     current_rpm = get_flywheel_rpm()
+
+#     if abs(current_rpm) > 5.0:   # only bother if it's actually spinning
+#         if current_rpm > 0:
+#             # Spinning forward — push reverse
+#             rpwm.value = 0.0
+#             lpwm.value = BRAKE_DUTY
+#         else:
+#             # Spinning backward — push forward
+#             rpwm.value = BRAKE_DUTY
+#             lpwm.value = 0.0
+#         time.sleep(BRAKE_TIME)
+
+#     # Then drop to passive brake (your existing brake mode)
 #     rpwm.value = 0.0
 #     lpwm.value = 0.0
 #     r_en.value = 1.0
 #     l_en.value = 1.0
-#     #TODO: apply a smidge of negative power to actually stop the flywheel
-def stop_motor():
-    """
-    Active brake: briefly apply reverse power to fight flywheel inertia,
-    then cut to passive brake (EN pins high, PWM low).
-    """
-    BRAKE_DUTY    = 0.15   # 15% reverse — tune this up/down as needed
-    BRAKE_TIME    = 0.08   # seconds to hold reverse — tune this too
-
-    # Figure out which way the flywheel is currently spinning
-    # so we can push against it
-    current_rpm = get_flywheel_rpm()
-
-    if abs(current_rpm) > 5.0:   # only bother if it's actually spinning
-        if current_rpm > 0:
-            # Spinning forward — push reverse
-            rpwm.value = 0.0
-            lpwm.value = BRAKE_DUTY
-        else:
-            # Spinning backward — push forward
-            rpwm.value = BRAKE_DUTY
-            lpwm.value = 0.0
-        time.sleep(BRAKE_TIME)
-
-    # Then drop to passive brake (your existing brake mode)
-    rpwm.value = 0.0
-    lpwm.value = 0.0
-    r_en.value = 1.0
-    l_en.value = 1.0
 
 def cleanup():
     stop_motor()
@@ -211,7 +212,7 @@ class PID:
 
 # ─── MAIN CONTROL LOOP ────────────────────────────────────────────────────────
 pid = PID(Kp, Ki, Kd, output_limit=MAX_DUTY)
-_was_active = False   # tracks whether motor was running last cycle
+# _was_active = False   # tracks whether motor was running last cycle
 
 print("Reaction Wheel Stabiliser")
 print(f"  PID gains  →  Kp={Kp}  Ki={Ki}  Kd={Kd}")
@@ -236,33 +237,33 @@ try:
             continue
 
         # 2. Dead band — treat near-zero as exactly zero
-        # if abs(omega_z) < DEAD_BAND_RAD_S:
-        #     error = 0.0
-        #     pid.reset()         # also clears integral so it doesn't drift
-        #     stop_motor()
-        # else:
-        #     # Setpoint = 0 rad/s, so error = 0 − omega_z
-        #     # The sign convention matters:
-        #     #   positive omega_z → platform spinning CW (when viewed from above)
-        #     #   we need the flywheel to spin CW too (same direction) to push back
-        #     #   → positive duty = correct response
-        #     error = -omega_z    # negate: positive platform spin → positive motor command #TODO: flip if spinning wrong way
-        #     duty  = pid.compute(error)
-        #     set_motor(duty)
         if abs(omega_z) < DEAD_BAND_RAD_S:
-            if _was_active:          # first cycle entering dead band — brake once
-                stop_motor()
-                _was_active = False
-            else:                    # already stopped — just hold passive brake
-                rpwm.value = 0.0
-                lpwm.value = 0.0
             error = 0.0
-            pid.reset()
+            pid.reset()         # also clears integral so it doesn't drift
+            stop_motor()
         else:
-            _was_active = True
-            error = -omega_z
+            # Setpoint = 0 rad/s, so error = 0 − omega_z
+            # The sign convention matters:
+            #   positive omega_z → platform spinning CW (when viewed from above)
+            #   we need the flywheel to spin CW too (same direction) to push back
+            #   → positive duty = correct response
+            error = -omega_z    # negate: positive platform spin → positive motor command #TODO: flip if spinning wrong way
             duty  = pid.compute(error)
             set_motor(duty)
+        # if abs(omega_z) < DEAD_BAND_RAD_S:
+        #     if _was_active:          # first cycle entering dead band — brake once
+        #         stop_motor()
+        #         _was_active = False
+        #     else:                    # already stopped — just hold passive brake
+        #         rpwm.value = 0.0
+        #         lpwm.value = 0.0
+        #     error = 0.0
+        #     pid.reset()
+        # else:
+        #     _was_active = True
+        #     error = -omega_z
+        #     duty  = pid.compute(error)
+        #     set_motor(duty)
 
         # 3. Read flywheel speed for logging
         flywheel_rpm = get_flywheel_rpm()

@@ -39,6 +39,11 @@ Ki = 0.5
 Kd = 1.0
 DEAD_BAND_RAD_S = 0.007
 MAX_DUTY        = 80.0
+# --- Camera position correction ---
+# How hard to push when the object is off-centre.
+# Start low and increase if it's slow to recentre.
+# Too high and it'll oscillate just like the IMU PID did.
+Kp_cam = 15.0
 
 # --- Search ---
 SEARCH_DUTY = 10.0      # % duty — flip sign if spinning wrong direction
@@ -378,14 +383,17 @@ def main():
     state       = SEARCH
     lost_count  = 0
     motor_out   = 0.0
-    _was_active = False
+    # _was_active = False
 
     print(f"\nStarting. HSV range: {HSV_LOWER} → {HSV_UPPER}")
     print(f"Min rect area: {MIN_RECT_AREA}px²  |  "
           f"Centre tol: ±{CENTRE_TOL_X*100:.0f}% x  ±{CENTRE_TOL_Y*100:.0f}% y")
     print()
+    # print(f"{'Time':>7} | {'State':>8} | {'ω_z (rad/s)':>12} | "
+    #   f"{'ω_z (°/s)':>10} | {'Rect area':>10} | {'Dir':>4} | {'Motor %':>8}")
+    # print("-" * 79)
     print(f"{'Time':>7} | {'State':>8} | {'ω_z (rad/s)':>12} | "
-      f"{'ω_z (°/s)':>10} | {'Rect area':>10} | {'Dir':>4} | {'Motor %':>8}")
+      f"{'ω_z (°/s)':>10} | {'Rect area':>10} | {'Offset':>6} | {'Motor %':>8}")
     print("-" * 79)
 
     try:
@@ -402,7 +410,7 @@ def main():
             # ── State machine ─────────────────────────────────────────────────
             if state == SEARCH:
                 lost_count  = 0
-                _was_active = False
+                # _was_active = False
                 pid.reset()
 
                 if detected:
@@ -429,24 +437,56 @@ def main():
                     lost_count += 1
                     if lost_count >= LOST_FRAMES_THRESHOLD:
                         state = SEARCH
+                        stop_motor()
                         print(f"\n  ✗ Object lost! → SEARCH")
+                        motor_out = 0.0
                 else:
                     lost_count = 0
 
-                if abs(omega_z) < DEAD_BAND_RAD_S:
-                    if _was_active:
-                        stop_motor()
-                        _was_active = False
+                    if rect is not None:
+                        x, y, w, h = rect
+                        rect_cx = x + w // 2
+
+                        # Normalised offset: -1.0 = object at far left,
+                        #                     0.0 = dead centre,
+                        #                    +1.0 = object at far right
+                        offset = (rect_cx - _frame_cx) / _frame_cx
+
+                        # Proportional correction — push toward the object
+                        motor_out = Kp_cam * offset
+                        motor_out = max(-MAX_DUTY, min(MAX_DUTY, motor_out))
+
+                        if abs(offset) < 0.05:   # within 5% of centre — close enough, hold
+                            stop_motor()
+                            motor_out = 0.0
+                        else:
+                            set_motor(motor_out)
                     else:
-                        rpwm.value = 0.0
-                        lpwm.value = 0.0
-                    pid.reset()
-                    motor_out = 0.0
-                else:
-                    _was_active = True
-                    error     = -omega_z
-                    motor_out = pid.compute(error)
-                    set_motor(motor_out)
+                        stop_motor()
+                        motor_out = 0.0
+            # elif state == LOCKED:
+            #     if not detected:
+            #         lost_count += 1
+            #         if lost_count >= LOST_FRAMES_THRESHOLD:
+            #             state = SEARCH
+            #             print(f"\n  ✗ Object lost! → SEARCH")
+            #     else:
+            #         lost_count = 0
+
+            #     if abs(omega_z) < DEAD_BAND_RAD_S:
+            #         if _was_active:
+            #             stop_motor()
+            #             _was_active = False
+            #         else:
+            #             rpwm.value = 0.0
+            #             lpwm.value = 0.0
+            #         pid.reset()
+            #         motor_out = 0.0
+            #     else:
+            #         _was_active = True
+            #         error     = -omega_z
+            #         motor_out = pid.compute(error)
+            #         set_motor(motor_out)
 
             # elif state == LOST:
             #     stop_motor()
@@ -460,10 +500,16 @@ def main():
             # ── Console log ───────────────────────────────────────────────────
             dir_str  = {-1: "LEFT", 0: "----", 1: "RGHT"}.get(last_seen_dir, "----")
             area_str = f"{area}px²" if rect is not None else "none"
+            offset_str = f"{((rect[0]+rect[2]//2-_frame_cx)/_frame_cx):+.2f}" if rect is not None else " none"
+
             print(f"{time.time():>7.2f} | {state:>8} | {omega_z:>+12.4f} | "
                 f"{math.degrees(omega_z):>+10.2f} | {area_str:>10} | "
-                f"{dir_str:>4} | {motor_out:>+8.1f}",
+                f"{offset_str:>6} | {motor_out:>+8.1f}",
                 end="\r")
+            # print(f"{time.time():>7.2f} | {state:>8} | {omega_z:>+12.4f} | "
+            #     f"{math.degrees(omega_z):>+10.2f} | {area_str:>10} | "
+            #     f"{dir_str:>4} | {motor_out:>+8.1f}",
+            #     end="\r")
 
             # ── Pace loop ─────────────────────────────────────────────────────
             elapsed = time.time() - t0

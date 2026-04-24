@@ -23,7 +23,7 @@ HSV_LOWER_R1 = np.array([  0,  80,  80], dtype=np.uint8)
 HSV_UPPER_R1 = np.array([ 10, 255, 255], dtype=np.uint8)
 HSV_LOWER_R2 = np.array([160,  80,  80], dtype=np.uint8)
 HSV_UPPER_R2 = np.array([179, 255, 255], dtype=np.uint8)
-MIN_RECT_AREA = 2000
+MIN_RECT_AREA = 500
 CENTRE_TOL_X  = 0.30
 CENTRE_TOL_Y  = 0.30
 

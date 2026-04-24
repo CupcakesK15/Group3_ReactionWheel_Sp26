@@ -1,0 +1,88 @@
+# Code for Checkpoint 1: Rotate the flywheel at a given speed and keep it constant. 
+# We basically did this by using encoder outputs to calculate the speed of the motor, then adjust the power as needed to 
+# ensure that the speed was what we were aiming for. 
+
+from gpiozero import PWMOutputDevice, OutputDevice, RotaryEncoder
+from gpiozero.pins.lgpio import LGPIOFactory
+from gpiozero import Device
+import time
+
+Device.pin_factory = LGPIOFactory()
+
+# --- Pin Configuration ---
+RPWM = 12
+LPWM = 13
+R_EN = 22
+L_EN = 23
+ENC_A = 5
+ENC_B = 6
+
+TICKS_PER_REV = 14  #Technically should be 28, but our's is a little special
+
+# --- Motor Setup ---
+rpwm = PWMOutputDevice(RPWM, frequency=1000)
+lpwm = PWMOutputDevice(LPWM, frequency=1000)
+r_en = OutputDevice(R_EN, initial_value=True)
+l_en = OutputDevice(L_EN, initial_value=True)
+
+# --- Encoder Setup ---
+encoder = RotaryEncoder(ENC_A, ENC_B, max_steps=0)  # max_steps=0 = unlimited
+last_steps = 0
+last_time = time.time()
+
+print(f"Encoder initialized. Steps: {encoder.steps}")
+
+def get_rpm():
+    global last_steps, last_time
+    now = time.time()
+    dt = now - last_time
+    current_steps = encoder.steps
+    ticks = current_steps - last_steps
+    last_steps = current_steps
+    last_time = now
+    if dt == 0:
+        return 0.0
+    rps = ticks / TICKS_PER_REV / dt
+    rpm = rps * 60
+    rpm = -rpm
+    return rpm
+
+def test_motor(power):
+    """
+    power: -100 to 100
+    Positive = Clockwise, Negative = Counter-Clockwise
+    """
+    speed = max(-100, min(100, power)) / 100.0
+    if speed >= 0:
+        print(f"Spinning Clockwise at {power}% power...")
+        rpwm.value = speed
+        lpwm.value = 0
+    else:
+        print(f"Spinning Counter-Clockwise at {abs(power)}% power...")
+        rpwm.value = 0
+        lpwm.value = -speed
+
+def cleanup():
+    rpwm.value = 0
+    lpwm.value = 0
+    r_en.off()
+    l_en.off()
+    rpwm.close()
+    lpwm.close()
+    r_en.close()
+    l_en.close()
+    encoder.close()
+
+try:
+    test_motor(25)
+    for _ in range(400):        # 400 × 0.1s = 40 seconds
+        time.sleep(0.1)
+        rpm = get_rpm()
+        print(f"RPM: {rpm:.1f}")
+
+except KeyboardInterrupt:
+    print("\nManual stop.")
+
+finally:
+    print("Cleaning up GPIO.")
+    cleanup()

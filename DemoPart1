@@ -1,0 +1,289 @@
+# Demo Part 1: Apply power to the flywheel to keep the platform at 0 rpm
+# We basically did this by seeing if the platform was spinning, and based off of what the rotation's
+# speed and direction was, used a PID controller to apply power to the flywheel to slow it back to 0 rpm
+
+import time
+import math
+import board
+import busio
+from adafruit_bno08x.i2c import BNO08X_I2C
+from adafruit_bno08x import BNO_REPORT_GYROSCOPE, BNO_REPORT_ROTATION_VECTOR
+from gpiozero import PWMOutputDevice, OutputDevice, RotaryEncoder
+from gpiozero.pins.lgpio import LGPIOFactory
+from gpiozero import Device
+
+# ─── PIN FACTORY (required for Pi 5) ─────────────────────────────────────────
+Device.pin_factory = LGPIOFactory()
+
+# ─── PIN CONFIGURATION ────────────────────────────────────────────────────────
+RPWM_PIN  = 12
+LPWM_PIN  = 13
+R_EN_PIN  = 22
+L_EN_PIN  = 23
+ENC_A_PIN = 5
+ENC_B_PIN = 6
+
+# ─── TUNING CONSTANTS ─────────────────────────────────────────────────────────
+TICKS_PER_REV = 14       # Just use CPR from previous ones directly here because of our setup
+
+# PID gains — start here, tune from these values:
+#   Kp: primary "push back" strength. Increase if response is sluggish.
+#   Ki: corrects steady-state drift (residual spin). Increase slowly.
+#   Kd: damps oscillation / overshoot. Increase if platform oscillates.
+Kp = 45.0 #TODO: 1. mess with this till it is good
+Ki = 0.5 #5.4 #5.5 #TODO: 3. make TINY ASS changes if it drifts over time
+Kd = 0.55 #0.9 #TODO: 2. increase this to reduce oscillations of the platform as it corrects
+
+# Dead band: ignore platform velocities smaller than this (rad/s).
+# Prevents the motor from buzzing when the platform is essentially still.
+# Typical gyro noise floor is ~0.002–0.005 rad/s; set above that.
+DEAD_BAND_RAD_S = 0.007 #TODO: check this and see if this is too small
+
+# Safety cap on motor duty cycle output (0–100%).
+# Keeps the flywheel from hitting mechanical limits while tuning PID.
+MAX_DUTY = 80.0
+
+# Loop timing
+LOOP_HZ       = 50          # Control loop rate (Hz)
+LOOP_PERIOD   = 1.0 / LOOP_HZ
+
+# ─── HARDWARE INIT ────────────────────────────────────────────────────────────
+# Motor driver
+rpwm  = PWMOutputDevice(RPWM_PIN, frequency=1000)
+lpwm  = PWMOutputDevice(LPWM_PIN, frequency=1000)
+r_en  = OutputDevice(R_EN_PIN, initial_value=True)
+l_en  = OutputDevice(L_EN_PIN, initial_value=True)
+
+# Encoder
+encoder    = RotaryEncoder(ENC_A_PIN, ENC_B_PIN, max_steps=0)
+_last_steps = 0
+_last_enc_t = time.time()
+
+# IMU
+i2c = busio.I2C(board.SCL, board.SDA, frequency=100000)
+imu = BNO08X_I2C(i2c)
+imu.enable_feature(BNO_REPORT_GYROSCOPE)
+imu.enable_feature(BNO_REPORT_ROTATION_VECTOR)
+
+# ─── MOTOR CONTROL ────────────────────────────────────────────────────────────
+def set_motor(duty: float):
+    """
+    duty: -100.0 to +100.0 percent.
+    Positive → flywheel spins CW (platform reacts CCW).
+    Negative → flywheel spins CCW (platform reacts CW).
+    """
+    duty = max(-100.0, min(100.0, duty)) / 100.0
+    if duty >= 0:
+        rpwm.value = duty
+        lpwm.value = 0.0
+    else:
+        rpwm.value = 0.0
+        lpwm.value = -duty
+
+def stop_motor():
+    rpwm.value = 0.0
+    lpwm.value = 0.0
+    # r_en.value = 1.0
+    # l_en.value = 1.0
+
+#     #apply a smidge of negative power to actually stop the flywheel - no worky
+# def stop_motor():
+#     """
+#     Active brake: briefly apply reverse power to fight flywheel inertia,
+#     then cut to passive brake (EN pins high, PWM low).
+#     """
+#     BRAKE_DUTY    = 0.1   # 15% reverse — tune this up/down as needed
+#     BRAKE_TIME    = 0.5   # seconds to hold reverse — tune this too
+
+#     # Figure out which way the flywheel is currently spinning
+#     # so we can push against it
+#     current_rpm = get_flywheel_rpm()
+
+#     if abs(current_rpm) > 5.0:   # only bother if it's actually spinning
+#         if current_rpm > 0:
+#             # Spinning forward — push reverse
+#             rpwm.value = 0.0
+#             lpwm.value = BRAKE_DUTY
+#         else:
+#             # Spinning backward — push forward
+#             rpwm.value = BRAKE_DUTY
+#             lpwm.value = 0.0
+#         time.sleep(BRAKE_TIME)
+
+#     # Then drop to passive brake (your existing brake mode)
+#     rpwm.value = 0.0
+#     lpwm.value = 0.0
+#     r_en.value = 1.0
+#     l_en.value = 1.0
+
+def cleanup():
+    stop_motor()
+    rpwm.close()
+    lpwm.close()
+    r_en.close()
+    l_en.close()
+    encoder.close()
+
+# ─── ENCODER / FLYWHEEL RPM ───────────────────────────────────────────────────
+def get_flywheel_rpm() -> float:
+    """Returns current flywheel speed in RPM (signed)."""
+    global _last_steps, _last_enc_t
+    now   = time.time()
+    dt    = now - _last_enc_t
+    steps = encoder.steps
+    ticks = steps - _last_steps
+    _last_steps = steps
+    _last_enc_t = now
+    if dt <= 0:
+        return 0.0
+    rps = ticks / TICKS_PER_REV / dt
+    return rps * 60.0  # RPM
+
+# ─── IMU HELPERS ─────────────────────────────────────────────────────────────
+def _quat_to_R(qi, qj, qk, qr):
+    """Quaternion → 3×3 rotation matrix (world-from-body)."""
+    w, x, y, z = qr, qi, qj, qk
+    return [
+        [1-2*(y*y+z*z),   2*(x*y-z*w),   2*(x*z+y*w)],
+        [  2*(x*y+z*w), 1-2*(x*x+z*z),   2*(y*z-x*w)],
+        [  2*(x*z-y*w),   2*(y*z+x*w), 1-2*(x*x+y*y)],
+    ]
+
+def get_platform_omega_z() -> float | None:
+    """
+    Returns platform angular velocity about the true world-vertical axis
+    in rad/s, or None if the IMU data isn't ready yet.
+    """
+    gyro = imu.gyro
+    quat = imu.quaternion
+    if gyro is None or quat is None:
+        return None
+    gx, gy, gz = gyro
+    qi, qj, qk, qr = quat
+    R = _quat_to_R(qi, qj, qk, qr)
+    wz = R[2][0]*gx + R[2][1]*gy + R[2][2]*gz
+    return wz
+
+# ─── PID CONTROLLER ───────────────────────────────────────────────────────────
+class PID:
+    def __init__(self, kp, ki, kd, output_limit=100.0):
+        self.kp = kp
+        self.ki = ki
+        self.kd = kd
+        self.limit = output_limit
+        self._integral   = 0.0
+        self._prev_error = 0.0
+        self._prev_time  = None
+
+    def reset(self):
+        self._integral   = 0.0
+        self._prev_error = 0.0
+        self._prev_time  = None
+
+    def compute(self, error: float) -> float:
+        """
+        error  = setpoint − measurement  (setpoint is always 0 here)
+        Returns motor duty cycle to apply (-limit … +limit).
+        """
+        now = time.time()
+        if self._prev_time is None:
+            dt = LOOP_PERIOD
+        else:
+            dt = now - self._prev_time
+        if dt <= 0:
+            dt = LOOP_PERIOD
+        self._prev_time = now
+
+        # Proportional
+        p = self.kp * error
+
+        # Integral (with anti-windup clamp)
+        self._integral += error * dt
+        max_i = self.limit / (self.ki if self.ki != 0 else 1e-9)
+        self._integral = max(-max_i, min(max_i, self._integral))
+        i = self.ki * self._integral
+
+        # Derivative (on measurement to avoid derivative kick on setpoint change)
+        d = self.kd * (error - self._prev_error) / dt
+        self._prev_error = error
+
+        output = p + i + d
+        return max(-self.limit, min(self.limit, output))
+
+# ─── MAIN CONTROL LOOP ────────────────────────────────────────────────────────
+pid = PID(Kp, Ki, Kd, output_limit=MAX_DUTY)
+# _was_active = False   # tracks whether motor was running last cycle
+
+print("Reaction Wheel Stabiliser")
+print(f"  PID gains  →  Kp={Kp}  Ki={Ki}  Kd={Kd}")
+print(f"  Dead band  →  ±{DEAD_BAND_RAD_S} rad/s")
+print(f"  Loop rate  →  {LOOP_HZ} Hz")
+print()
+print("Warming up IMU for 3 seconds — keep platform still...")
+time.sleep(3)
+print("Running. Press Ctrl-C to stop.\n")
+print(f"{'Time':>7} | {'Platform ω (rad/s)':>20} | {'Platform ω (°/s)':>17} | "
+      f"{'Flywheel RPM':>13} | {'Motor duty %':>12}")
+print("-" * 82)
+
+try:
+    while True:
+        t_start = time.time()
+
+        # 1. Read platform angular velocity
+        omega_z = get_platform_omega_z()
+        if omega_z is None:
+            time.sleep(0.005)
+            continue
+
+        # 2. Dead band — treat near-zero as exactly zero
+        if abs(omega_z) < DEAD_BAND_RAD_S:
+            error = 0.0
+            pid.reset()         # also clears integral so it doesn't drift
+            stop_motor()
+        else:
+            # Setpoint = 0 rad/s, so error = 0 − omega_z
+            # The sign convention matters:
+            #   positive omega_z → platform spinning CW (when viewed from above)
+            #   we need the flywheel to spin CW too (same direction) to push back
+            #   → positive duty = correct response
+            error = -omega_z    # negate: positive platform spin → positive motor command #TODO: flip if spinning wrong way
+            duty  = pid.compute(error)
+            set_motor(duty)
+        # if abs(omega_z) < DEAD_BAND_RAD_S:
+        #     if _was_active:          # first cycle entering dead band — brake once
+        #         stop_motor()
+        #         _was_active = False
+        #     else:                    # already stopped — just hold passive brake
+        #         rpwm.value = 0.0
+        #         lpwm.value = 0.0
+        #     error = 0.0
+        #     pid.reset()
+        # else:
+        #     _was_active = True
+        #     error = -omega_z
+        #     duty  = pid.compute(error)
+        #     set_motor(duty)
+
+        # 3. Read flywheel speed for logging
+        flywheel_rpm = get_flywheel_rpm()
+
+        # 4. Log
+        t_elapsed = t_start  - (t_start - t_start)  # just use wall time delta below
+        duty_disp = 0.0 if abs(omega_z) < DEAD_BAND_RAD_S else pid.compute(error) if False else \
+                    (rpwm.value - lpwm.value) * 100.0
+        print(f"{time.time():>7.2f} | {omega_z:>+20.4f} | {math.degrees(omega_z):>+17.2f} | "
+              f"{flywheel_rpm:>+13.1f} | {duty_disp:>+12.1f}")
+
+        # 5. Pace loop
+        elapsed = time.time() - t_start
+        sleep_t = LOOP_PERIOD - elapsed
+        if sleep_t > 0:
+            time.sleep(sleep_t)
+
+except KeyboardInterrupt:
+    print("\n\nUser stopped. Spinning down flywheel...")
+
+finally:
+    cleanup()
+    print("Cleaned up. Goodbye.")

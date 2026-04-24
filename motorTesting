@@ -1,0 +1,73 @@
+from gpiozero import PWMOutputDevice, DigitalOutputDevice, RotaryEncoder
+import time
+
+# --- Hardware Configuration (BCM Pins) ---
+RPWM_PIN = 12  # Pin 1 on Dupont header [cite: 43]
+LPWM_PIN = 13  # Pin 2 on Dupont header [cite: 43]
+REN_PIN  = 22  # Pin 3 on Dupont header [cite: 43]
+LEN_PIN  = 23  # Pin 4 on Dupont header [cite: 43]
+ENC_A    = 17  
+ENC_B    = 18  
+
+# --- Setup Devices ---
+r_pwm = PWMOutputDevice(RPWM_PIN)
+l_pwm = PWMOutputDevice(LPWM_PIN)
+r_en = DigitalOutputDevice(REN_PIN)
+l_en = DigitalOutputDevice(LEN_PIN)
+encoder = RotaryEncoder(ENC_A, ENC_B, max_steps=0)
+
+# --- Initialize Driver ---
+r_en.on() # R_EN must be high for forward/reverse 
+l_en.on() # L_EN must be high for forward/reverse 
+
+# --- Variables ---
+target_velocity = 600  # CHANGE THIS VARIABLE (Ticks per second)
+kp = 0.0002            # Adjustment strength (tune this if it oscillates)
+current_pwm = 0.0      # Starting duty cycle
+
+last_ticks = 0
+last_time = time.time()
+
+print("Motor Control Active. Press Ctrl+C to stop.")
+
+try:
+    while True:
+        # 1. Calculate Actual Velocity
+        now = time.time()
+        dt = now - last_time
+        curr_ticks = encoder.steps
+        
+        # Velocity = delta_ticks / delta_time
+        # actual_velocity = (curr_ticks - last_ticks) / dt
+        actual_velocity = abs((curr_ticks - last_ticks) / dt)
+        
+        # 2. Control Loop
+        error = target_velocity - actual_velocity
+        current_pwm += error * kp
+        
+        # Keep PWM within valid 0.0 to 1.0 range
+        current_pwm = max(-1.0, min(1.0, current_pwm))
+        
+        # 3. Apply PWM to BTS7960
+        if current_pwm >= 0:
+            l_pwm.value = 0
+            r_pwm.value = abs(current_pwm)
+        else:
+            r_pwm.value = 0
+            l_pwm.value = abs(current_pwm)
+            
+        # 4. Output Telemetry
+        print(f"Target: {target_velocity} | Actual: {actual_velocity:.1f} | PWM: {current_pwm:.3f}")
+        
+        # Update for next iteration
+        last_ticks = curr_ticks
+        last_time = now
+        time.sleep(0.05) # 20Hz update rate
+
+except KeyboardInterrupt:
+    # Safety: Set all control inputs to 0 
+    r_pwm.value = 0
+    l_pwm.value = 0
+    r_en.off()
+    l_en.off()
+    print("\nMotor Emergency Stop Engaged.")

@@ -36,7 +36,7 @@ TICKS_PER_REV = 14
 # --- Stabiliser PID ---
 Kp = 45.0
 Ki = 0.5
-Kd = 0.55
+Kd = 1.0
 DEAD_BAND_RAD_S = 0.007
 MAX_DUTY        = 80.0
 
@@ -73,7 +73,7 @@ HSV_UPPER_R2 = np.array([179, 255, 255], dtype=np.uint8)
 # --- Detection thresholds ---
 # Minimum bounding rectangle area in pixels² to count as a real detection.
 # Raise if getting false positives, lower if it won't detect at range.
-MIN_RECT_AREA = 2000    # roughly 45×45 px at 640×480
+MIN_RECT_AREA = 1000    # roughly 45×45 px at 640×480
 
 # How close the rectangle centre must be to frame centre to trigger LOCK.
 # Expressed as fraction of frame size (0.0 = dead centre only, 0.5 = anywhere).
@@ -428,7 +428,7 @@ def main():
                 if not detected:
                     lost_count += 1
                     if lost_count >= LOST_FRAMES_THRESHOLD:
-                        state = LOST
+                        state = SEARCH
                         print(f"\n  ✗ Object lost! → SEARCH")
                 else:
                     lost_count = 0
@@ -448,14 +448,14 @@ def main():
                     motor_out = pid.compute(error)
                     set_motor(motor_out)
 
-            elif state == LOST:
-                stop_motor()
-                time.sleep(0.5)
-                pid.reset()
-                state       = SEARCH
-                lost_count  = 0
-                _was_active = False
-                motor_out   = 0.0
+            # elif state == LOST:
+            #     stop_motor()
+            #     time.sleep(0.001)
+            #     pid.reset()
+            #     state       = SEARCH
+            #     lost_count  = 0
+            #     _was_active = False
+            #     motor_out   = 0.0
 
             # ── Console log ───────────────────────────────────────────────────
             dir_str  = {-1: "LEFT", 0: "----", 1: "RGHT"}.get(last_seen_dir, "----")
